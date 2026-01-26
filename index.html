@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Edil-Construct | Gestiune Integrată v23.1</title>
+    <title>Edil-Construct | Gestiune Integrată v23.5</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://unpkg.com/lucide@latest"></script>
     <style>
@@ -19,6 +19,7 @@
         .comment-bubble { background: rgba(255,255,255,0.03); border-radius: 8px; padding: 6px 10px; margin-top: 4px; border-left: 2px solid #3b82f6; }
         .calc-input { background: transparent; border-bottom: 1px solid #334155; color: white; font-size: 10px; width: 40px; text-align: center; }
         .debt-circle { width: 35px; height: 35px; border-radius: 50%; background: #ef4444; border: 2px solid #f87171; display: flex; align-items: center; justify-content: center; font-size: 8px; font-weight: 900; color: white; box-shadow: 0 0 10px rgba(239, 68, 68, 0.5); }
+        .count-badge-client { width: 20px; height: 20px; background: #3b82f6; color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 900; margin-left: 6px; }
         .activity-badge { background: #10b981; color: white; padding: 2px 6px; border-radius: 6px; font-size: 10px; font-weight: 900; }
         .pin-dot { transition: all 0.2s; }
     </style>
@@ -55,6 +56,7 @@
             'livrate': { label: 'LIVRATE', icon: 'check-check', color: 'border-emerald-500' },
             'returnate': { label: 'RETUR', icon: 'refresh-cw', color: 'border-rose-500' },
             'primit': { label: 'DEPOZIT', icon: 'warehouse', color: 'border-orange-400' },
+            'cereri': { label: 'CERERI ANGAJAȚI', icon: 'bell-ring', color: 'border-purple-500' }, 
             'datornici': { label: 'DATORNICI', icon: 'user-minus', color: 'border-rose-600' },
             'achitate': { label: 'ACHITATE', icon: 'user-check', color: 'border-emerald-600' },
             'salarii': { label: 'SALARII', icon: 'wallet', color: 'border-emerald-500' },
@@ -68,20 +70,15 @@
             showAddModal: false, loginMode: 'PORTAL', pinBuffer: '', clientPhone: '', hasWelcomed: false, expandedId: null, loginUserSelected: null
         };
 
-        // --- VOCE AI MODIFICAT ---
         function speakWelcome(user, stats) {
             if (state.hasWelcomed || state.isClient) return;
             const synth = window.speechSynthesis;
-            
             let msgText = user === 'SEFU' 
                 ? `Salut Nicolae. Compania ta astăzi a efectuat ${stats.todayCount} comenzi. La moment sunt ${stats.activeCount} comenzi active.` 
                 : `Salut ${user}. Sunt ${stats.visibleCount} comenzi noi.`;
-
-            // Adaos: Dacă sunt zero comenzi, cere inventariere
             if (stats.visibleCount === 0 && user !== 'SEFU') {
                 msgText += " Dacă nu ai de lucru, fă inventariere la minim două articole din depozit și spune rezultatul la birou.";
             }
-
             const utterance = new SpeechSynthesisUtterance(msgText); 
             utterance.lang = 'ro-RO'; 
             utterance.rate = 0.9;
@@ -89,7 +86,6 @@
             state.hasWelcomed = true;
         }
 
-        // --- AUTH LOGIC ---
         window.updatePhoneState = (val) => { state.clientPhone = val; };
         window.startLogin = (u) => { state.loginUserSelected = u; state.pinBuffer = ''; state.loginMode = 'STAFF_PIN'; render(); };
         
@@ -98,7 +94,6 @@
                 state.pinBuffer += digit;
                 const dots = document.querySelectorAll('.pin-dot');
                 if(dots[state.pinBuffer.length-1]) dots[state.pinBuffer.length-1].classList.add('bg-blue-500');
-
                 if(state.pinBuffer.length === 4) {
                     setTimeout(() => {
                         if(state.loginMode === 'PORTAL') window.handlePortalAuth();
@@ -126,7 +121,6 @@
             } else { alert("PIN INCORECT!"); state.pinBuffer = ''; render(); }
         };
 
-        // --- ACTIONS ---
         window.logout = () => { localStorage.clear(); state.userName = ''; state.hasWelcomed = false; state.loginMode = 'PORTAL'; render(); };
         window.setTab = (t) => { state.activeTab = t; state.expandedId = null; render(); };
         window.toggleExpand = (id) => { state.expandedId = (state.expandedId === id) ? null : id; render(); };
@@ -150,10 +144,12 @@
 
         window.handleStatusChange = async (itemId, nextStatus) => {
             const log = `[${new Date().toLocaleString('ro-RO')}] ${state.userName} -> ${STATUS_CONFIG[nextStatus].label}`;
-            await updateDoc(doc(db, "flux_logistic_v3", itemId), { status: nextStatus, updatedAt: serverTimestamp(), checkedBy: null, history: arrayUnion(log) });
+            let updateObj = { status: nextStatus, updatedAt: serverTimestamp(), checkedBy: null, history: arrayUnion(log) };
+            if(nextStatus === 'livrate') updateObj.deliveredAt = new Date().toLocaleString('ro-RO');
+            if(nextStatus === 'returnate') updateObj.returnedAt = new Date().toLocaleString('ro-RO');
+            await updateDoc(doc(db, "flux_logistic_v3", itemId), updateObj);
         };
 
-        // --- SALARY & CALC LOGIC ---
         window.toggleAttendance = async (user) => {
             const currentDays = state.salaries[user]?.daysWorked || 0;
             await setDoc(doc(db, "salarii", user), { daysWorked: currentDays + 1 }, { merge: true });
@@ -165,18 +161,37 @@
             if(confirm(`Resetezi datele pentru ${user}?`)) await setDoc(doc(db, "salarii", user), { daysWorked: 0, advance: 0 }, { merge: true });
         };
 
+        const recalculateOrder = (item) => {
+            let matTotal = 0;
+            item.materials.forEach(m => { if(m.calc) matTotal += (m.calc.qty * m.calc.days * m.calc.price); });
+            let transTotal = (item.transport?.qty || 0) * (item.transport?.price || 0);
+            item.totalSuma = matTotal + transTotal;
+            item.restDePlata = item.totalSuma - (item.avans || 0);
+        };
+
         window.updateMaterialCalc = async (itemId, matIdx, field, val) => {
             const item = state.items.find(i => i.id === itemId);
             if(!item.materials[matIdx].calc) item.materials[matIdx].calc = { qty: item.materials[matIdx].loaded || 0, days: 1, price: 0 };
             item.materials[matIdx].calc[field] = parseFloat(val) || 0;
-            let total = 0; item.materials.forEach(m => { if(m.calc) total += (m.calc.qty * m.calc.days * m.calc.price); });
-            await updateDoc(doc(db, "flux_logistic_v3", itemId), { materials: item.materials, totalSuma: total, restDePlata: total - (item.avans || 0) });
+            recalculateOrder(item);
+            await updateDoc(doc(db, "flux_logistic_v3", itemId), { materials: item.materials, totalSuma: item.totalSuma, restDePlata: item.restDePlata });
+        };
+
+        window.updateTransport = async (itemId, field, val) => {
+            const item = state.items.find(i => i.id === itemId);
+            if(!item.transport) item.transport = { qty: 0, price: 0 };
+            item.transport[field] = parseFloat(val) || 0;
+            recalculateOrder(item);
+            await updateDoc(doc(db, "flux_logistic_v3", itemId), { transport: item.transport, totalSuma: item.totalSuma, restDePlata: item.restDePlata });
         };
 
         window.updateOrderPayment = async (itemId, field, val) => {
             const v = parseFloat(val) || 0;
             const item = state.items.find(i => i.id === itemId);
-            if(field === 'avans') await updateDoc(doc(db, "flux_logistic_v3", itemId), { avans: v, restDePlata: (item.totalSuma || 0) - v });
+            if(field === 'avans') {
+                const total = item.totalSuma || 0;
+                await updateDoc(doc(db, "flux_logistic_v3", itemId), { avans: v, restDePlata: total - v });
+            }
         };
 
         window.updateQty = async (e, id, idx, val) => {
@@ -191,14 +206,20 @@
             const m_raw = document.getElementById('add_m').value;
             const p = document.getElementById('add_p').value;
             if(!t || !m_raw) return;
+            const isBirou = (state.userName === 'BIROU' || state.userName === 'SEFU');
+            const targetStatus = isBirou ? 'actuale' : 'cereri';
             const materials = m_raw.split('\n').filter(l => l.trim()).map(l => ({ qty: 1, name: l.trim(), loaded: 0, calc: {qty:0, days:1, price:0} }));
-            await addDoc(collection(db, "flux_logistic_v3"), { text: t, materials, phone: p, status: 'actuale', createdAt: serverTimestamp(), updatedAt: serverTimestamp(), comments: [], history: [] });
+            await addDoc(collection(db, "flux_logistic_v3"), { 
+                text: t, materials, phone: p, status: targetStatus, 
+                createdAt: serverTimestamp(), updatedAt: serverTimestamp(), 
+                comments: [], history: [`[${new Date().toLocaleString('ro-RO')}] Creată de ${state.userName}`],
+                createdBy: state.userName
+            });
             state.showAddModal = false;
         };
 
         window.handleDelete = async (e, id) => { if(e) e.stopPropagation(); if(confirm("Ștergi definitiv?")) await deleteDoc(doc(db, "flux_logistic_v3", id)); };
 
-        // --- RENDERERS ---
         function render() {
             const root = document.getElementById('root');
             if (!state.userName) renderLoginUI(root);
@@ -226,16 +247,33 @@
         }
 
         function renderClientDashboard(root) {
-            const myOrder = state.items.find(i => i.phone === state.userName && i.status !== 'istoric');
-            root.innerHTML = `<header class="glass sticky top-0 z-50 px-4 py-4 flex justify-between items-center"><span class="italic-force text-blue-500 text-xs">STATUS COMANDĂ</span><button onclick="window.logout()" class="text-[9px] font-bold bg-white/10 px-3 py-1.5 rounded-full">IEȘIRE</button></header>
-                <div class="p-6 max-w-lg mx-auto">${myOrder ? `
-                    <div class="order-card p-6 rounded-[2rem] border-l-4 ${STATUS_CONFIG[myOrder.status].color}">
-                        <h2 class="text-2xl font-black italic-force text-white mb-1">${myOrder.text}</h2>
-                        <div class="mb-6"><span class="bg-blue-600 px-3 py-1 rounded-full text-[9px] font-black uppercase">${STATUS_CONFIG[myOrder.status].label}</span></div>
-                        <div class="bg-black/40 rounded-2xl p-4 mb-6 space-y-2">${(myOrder.materials || []).map(m => `<div class="flex justify-between text-xs"><span>${m.name}</span><b class="text-emerald-500">${m.loaded}/${m.qty}</b></div>`).join('')}</div>
-                        <div class="mb-4 space-y-1">${(myOrder.history || []).slice(-2).map(log => `<div class="text-[8px] text-slate-500 italic">${log}</div>`).join('')}${(myOrder.comments || []).map(c => `<div class="comment-bubble text-[9px] text-blue-200">${c}</div>`).join('')}</div>
-                        <div class="flex gap-2"><input id="comment_input_${myOrder.id}" class="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-[10px] outline-none text-white" placeholder="Mesaj către birou..."><button onclick="addComment(event, '${myOrder.id}')" class="bg-slate-800 px-3 rounded-lg"><i data-lucide="send" size="12"></i></button></div>
-                    </div>` : `<div class="text-center py-20 text-slate-500 italic-force">NICIO COMANDĂ ACTIVĂ</div>`}</div>`;
+            const clientOrders = state.items.filter(i => i.phone === state.userName);
+            const activeOrders = clientOrders.filter(i => i.status !== 'istoric' && i.status !== 'achitate');
+            const totalDebt = clientOrders.filter(i => i.status === 'datornici').reduce((acc, curr) => acc + (curr.restDePlata || 0), 0);
+
+            root.innerHTML = `
+                <header class="glass sticky top-0 z-50 px-4 py-4 flex justify-between items-center">
+                    <div class="flex items-center gap-3">
+                        ${totalDebt > 0 ? `<div class="debt-circle">${Math.round(totalDebt)}</div>` : ''}
+                        <span class="italic-force text-blue-500 text-xs">CLIENT: ${state.userName}</span>
+                    </div>
+                    <button onclick="window.logout()" class="text-[9px] font-bold bg-white/10 px-3 py-1.5 rounded-full">IEȘIRE</button>
+                </header>
+                <div class="p-6 max-w-lg mx-auto">
+                    ${activeOrders.length > 0 ? activeOrders.map(myOrder => `
+                        <div class="order-card p-6 rounded-[2rem] border-l-4 ${STATUS_CONFIG[myOrder.status].color} mb-4">
+                            <h2 class="text-xl font-black italic-force text-white mb-1">${myOrder.text}</h2>
+                            <div class="mb-4 text-[9px] text-slate-400">
+                                ${myOrder.deliveredAt ? `<div>LIVRAT: ${myOrder.deliveredAt}</div>` : ''}
+                                ${myOrder.returnedAt ? `<div>RETUR: ${myOrder.returnedAt}</div>` : ''}
+                            </div>
+                            <div class="mb-6"><span class="bg-blue-600 px-3 py-1 rounded-full text-[9px] font-black uppercase">${STATUS_CONFIG[myOrder.status].label}</span></div>
+                            <div class="bg-black/40 rounded-2xl p-4 mb-4 space-y-2">${(myOrder.materials || []).map(m => `<div class="flex justify-between text-xs"><span>${m.name}</span><b class="text-emerald-500">${m.loaded}/${m.qty}</b></div>`).join('')}</div>
+                            ${myOrder.status === 'datornici' ? `<div class="text-right text-rose-500 font-black text-sm mb-2">DATORIE: ${Math.round(myOrder.restDePlata || 0)} L</div>` : ''}
+                            <div class="mb-4 space-y-1">${(myOrder.comments || []).map(c => `<div class="comment-bubble text-[9px] text-blue-200">${c}</div>`).join('')}</div>
+                            <div class="flex gap-2"><input id="comment_input_${myOrder.id}" class="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-[10px] outline-none text-white" placeholder="Mesaj către birou..."><button onclick="addComment(event, '${myOrder.id}')" class="bg-slate-800 px-3 rounded-lg"><i data-lucide="send" size="12"></i></button></div>
+                        </div>`).join('') : `<div class="text-center py-20 text-slate-500 italic-force">NICIO COMANDĂ ACTIVĂ</div>`}
+                </div>`;
         }
 
         function renderStaffDashboard(root) {
@@ -254,7 +292,7 @@
                 </header>
                 <nav class="flex gap-2 overflow-x-auto px-4 py-2 sticky top-[53px] glass z-40 no-scrollbar">
                     ${Object.keys(STATUS_CONFIG).map(k => {
-                        if ((k === 'datornici' || k === 'achitate' || k === 'salarii') && !isBirou) return '';
+                        if ((k === 'datornici' || k === 'achitate' || k === 'salarii' || k === 'cereri') && !isBirou) return '';
                         const count = state.items.filter(i => i.status === k).length;
                         return `<button onclick="window.setTab('${k}')" class="relative flex flex-col items-center min-w-[72px] p-2 rounded-xl ${state.activeTab === k ? 'tab-active' : 'text-slate-500'}">
                             ${count > 0 && !['achitate','istoric','salarii'].includes(k) ? `<div class="status-badge">${count}</div>` : ''}
@@ -267,7 +305,7 @@
                     ${renderPersonalSalaryCard()}
                     ${state.activeTab === 'salarii' ? renderSalariesPage() : 
                       state.items.filter(i => i.status === state.activeTab).map(item => renderOrderCard(item, isBirou)).join('')}
-                    ${isBirou && state.activeTab === 'actuale' ? `<button onclick="window.toggleAdd(true)" class="w-full bg-blue-600 py-4 rounded-xl italic-force text-[11px] mt-6 shadow-xl">+ COMANDĂ NOUĂ</button>` : ''}
+                    <button onclick="window.toggleAdd(true)" class="w-full bg-blue-600 py-4 rounded-xl italic-force text-[11px] mt-6 shadow-xl uppercase">+ COMANDĂ NOUĂ</button>
                 </div>
                 ${state.showAddModal ? renderAddModal() : ''}
             `;
@@ -289,14 +327,31 @@
 
         function renderOrderCard(item, isBirou) {
             const isExpanded = state.expandedId === item.id;
+            
+            // Logica noua pentru numarul de comenzi per client in rubrica curenta
+            let badgeHtml = '';
+            if ((item.status === 'livrate' || item.status === 'datornici') && item.phone) {
+                const sameClientCount = state.items.filter(i => i.phone === item.phone && i.status === item.status).length;
+                if (sameClientCount > 1) {
+                    badgeHtml = `<div class="count-badge-client">${sameClientCount}</div>`;
+                }
+            }
+
             return `
                 <div onclick="toggleExpand('${item.id}')" class="order-card p-4 mb-3 rounded-2xl border-l-4 ${STATUS_CONFIG[item.status].color} ${isExpanded ? 'ring-2 ring-blue-500/20' : ''}">
                     <div class="flex justify-between items-center">
                         <div>
-                            <h3 class="italic-force text-white text-[11px]">${item.text}</h3>
+                            <div class="flex items-center">
+                                <h3 class="italic-force text-white text-[11px]">${item.text}</h3>
+                                ${badgeHtml}
+                            </div>
                             <div class="flex gap-2 items-center">
                                 <a href="tel:${item.phone}" onclick="event.stopPropagation()" class="text-blue-400 text-[10px] font-black italic underline">${item.phone || 'N/A'}</a>
                                 ${item.checkedBy ? `<span class="bg-emerald-500 text-[7px] px-1 rounded text-black font-black">OK</span>` : ''}
+                            </div>
+                            <div class="text-[8px] font-bold mt-1 text-slate-500">
+                                ${item.deliveredAt ? `<span class="text-emerald-500 mr-2">LIVRAT: ${item.deliveredAt}</span>` : ''}
+                                ${item.returnedAt ? `<span class="text-rose-500">RETUR: ${item.returnedAt}</span>` : ''}
                             </div>
                         </div>
                         <div class="flex items-center gap-2">
@@ -315,7 +370,7 @@
                                                 `<input type="number" value="${m.loaded||0}" onchange="updateQty(event, '${item.id}', ${idx}, this.value)" class="w-10 bg-blue-900/30 border border-blue-500 rounded text-center text-blue-400 outline-none">` : 
                                                 `<b class="text-emerald-500">${m.loaded||0}</b>`}
                                         </div>
-                                        ${isBirou && (item.status === 'istoric' || item.status === 'datornici') ? `
+                                        ${isBirou && (item.status === 'istoric' || item.status === 'datornici' || item.status === 'achitate') ? `
                                             <div class="flex gap-1 items-center">
                                                 <input type="number" onchange="updateMaterialCalc('${item.id}', ${idx}, 'qty', this.value)" value="${m.calc?.qty || m.loaded}" class="calc-input">
                                                 <span class="text-[8px]">x</span>
@@ -327,8 +382,19 @@
                                         ` : ''}
                                     </div>
                                 `).join('')}
+                                ${isBirou && (item.status === 'istoric' || item.status === 'datornici' || item.status === 'achitate') ? `
+                                    <div class="flex flex-col gap-2 pt-2 border-t border-white/10">
+                                        <div class="flex justify-between text-[10px] text-blue-400 italic-force">TRANSPORT</div>
+                                        <div class="flex gap-1 items-center">
+                                            <input type="number" onchange="updateTransport('${item.id}', 'qty', this.value)" value="${item.transport?.qty || 0}" class="calc-input" placeholder="KM/H">
+                                            <span class="text-[8px]">x</span>
+                                            <input type="number" onchange="updateTransport('${item.id}', 'price', this.value)" value="${item.transport?.price || 0}" class="calc-input" placeholder="Pret">
+                                            <span class="text-[9px] font-bold text-blue-400 ml-auto">= ${Math.round((item.transport?.qty||0)*(item.transport?.price||0))}</span>
+                                        </div>
+                                    </div>
+                                ` : ''}
                             </div>
-                            ${isBirou && (item.status === 'istoric' || item.status === 'datornici') ? `
+                            ${isBirou && (item.status === 'istoric' || item.status === 'datornici' || item.status === 'achitate') ? `
                                 <div class="grid grid-cols-2 gap-2">
                                     <div class="bg-white/5 p-2 rounded-lg"><label class="text-[7px] block text-slate-500 uppercase">Avans</label>
                                     <input type="number" value="${item.avans || 0}" onchange="updateOrderPayment('${item.id}', 'avans', this.value)" class="bg-transparent w-full text-xs font-bold text-blue-400 outline-none"></div>
@@ -348,6 +414,13 @@
             const isSofer = ['MIHAI', 'VICTOR', 'NELU'].includes(state.userName);
             const isHamal = HAMALI.includes(state.userName);
             let h = "";
+
+            if (isBirou) {
+                h += `<div class="grid grid-cols-2 gap-2 mb-4">
+                    ${Object.keys(STATUS_CONFIG).map(k => `<button onclick="handleStatusChange('${item.id}', '${k}')" class="py-2 rounded-lg bg-slate-800 text-[7px] font-black border border-white/5 uppercase">${STATUS_CONFIG[k].label}</button>`).join('')}
+                </div>`;
+            }
+
             if (['receptionat', 'incarcat', 'livrate', 'returnate', 'primit'].includes(item.status)) {
                 h += `<button onclick="handleCheck(event, '${item.id}')" class="${btn} ${item.checkedBy ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-slate-500'}">
                     ${item.checkedBy ? `CONFIRMAT DE: ${item.checkedBy}` : 'CONFIRMĂ PASUL'}</button>`;
@@ -355,14 +428,8 @@
             if (item.status === 'actuale' && (isBirou || isHamal)) h += `<button onclick="handleStatusChange('${item.id}', 'receptionat')" class="${btn} bg-blue-600">LA RECEPȚIE</button>`;
             if (item.status === 'receptionat' && (isBirou || isHamal)) h += `<button onclick="handleStatusChange('${item.id}', 'incarcat')" class="${btn} bg-amber-600 text-black">LA ȘOFERI</button>`;
             if (item.status === 'incarcat' && (isBirou || isSofer)) h += `<button onclick="handleStatusChange('${item.id}', 'livrate')" class="${btn} bg-cyan-600">LIVRAT</button>`;
-            if (item.status === 'livrate' && isBirou) {
-                h += `<div class="grid grid-cols-2 gap-2"><button onclick="handleStatusChange('${item.id}', 'returnate')" class="py-3 bg-rose-600 rounded-xl text-[9px] font-black italic-force">RETUR</button>
-                      <button onclick="handleStatusChange('${item.id}', 'istoric')" class="py-3 bg-indigo-600 rounded-xl text-[9px] font-black italic-force">FINALIZAT</button></div>`;
-            }
             if (item.status === 'returnate' && (isBirou || isSofer)) h += `<button onclick="handleStatusChange('${item.id}', 'primit')" class="${btn} bg-orange-500">LA DEPOZIT</button>`;
-            if (item.status === 'primit' && isBirou) h += `<button onclick="handleStatusChange('${item.id}', 'istoric')" class="${btn} bg-indigo-600">FINALIZAT</button>`;
-            if (item.status === 'istoric' && isBirou) h += `<button onclick="handleStatusChange('${item.id}', 'datornici')" class="${btn} bg-rose-700">DATORNICI</button>`;
-            if (item.status === 'datornici' && isBirou) h += `<button onclick="handleStatusChange('${item.id}', 'achitate')" class="${btn} bg-emerald-700">ACHITAT</button>`;
+            
             if (isBirou) h += `<button onclick="handleDelete(event, '${item.id}')" class="w-full text-rose-900 text-[8px] mt-2">ȘTERGE COMANDĂ</button>`;
             return h;
         }
@@ -387,7 +454,7 @@
                     <input id="add_t" class="w-full bg-black p-4 rounded-2xl text-white mb-3 text-sm outline-none" placeholder="NUME CLIENT">
                     <textarea id="add_m" class="w-full bg-black p-4 rounded-2xl text-white mb-3 text-xs outline-none" rows="5" placeholder="MARFĂ (un rând pentru fiecare obiect)"></textarea>
                     <input id="add_p" class="w-full bg-black p-4 rounded-2xl text-white mb-8 text-sm outline-none" placeholder="TELEFON CLIENT">
-                    <button onclick="window.handleAddItem()" class="w-full bg-blue-600 py-5 rounded-2xl italic-force text-xs mb-4">CREEAZĂ COMANDA</button>
+                    <button onclick="window.handleAddItem()" class="w-full bg-blue-600 py-5 rounded-2xl italic-force text-xs mb-4">TRIMITE</button>
                     <button onclick="window.toggleAdd(false)" class="w-full text-slate-500 text-[10px] font-black uppercase">ANULARE</button>
                 </div>
             </div>`;
