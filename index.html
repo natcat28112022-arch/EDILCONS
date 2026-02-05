@@ -17,7 +17,7 @@
         .status-badge { position: absolute; top: -2px; right: 4px; background: #ef4444; color: white; font-size: 9px; font-weight: 900; min-width: 17px; height: 17px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 2px solid #020617; }
         .numpad-btn { background: #1e293b; color: white; height: 60px; border-radius: 16px; font-size: 20px; font-weight: 800; display: flex; align-items: center; justify-content: center; }
         .comment-bubble { background: rgba(255,255,255,0.03); border-radius: 8px; padding: 6px 10px; margin-top: 4px; border-left: 2px solid #3b82f6; }
-        .calc-input { background: transparent; border-bottom: 1px solid #334155; color: white; font-size: 10px; width: 40px; text-align: center; }
+        .calc-input { background: transparent; border-bottom: 1px solid #334155; color: white; font-size: 10px; width: 100%; text-align: center; outline: none; }
         .debt-circle { width: 35px; height: 35px; border-radius: 50%; background: #ef4444; border: 2px solid #f87171; display: flex; align-items: center; justify-content: center; font-size: 8px; font-weight: 900; color: white; box-shadow: 0 0 10px rgba(239, 68, 68, 0.5); }
         .count-badge-client { width: 20px; height: 20px; background: #3b82f6; color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 900; margin-left: 6px; }
         .activity-badge { background: #10b981; color: white; padding: 2px 6px; border-radius: 6px; font-size: 10px; font-weight: 900; }
@@ -69,7 +69,8 @@
             isClient: localStorage.getItem('is_client') === 'true',
             activeTab: 'actuale', items: [], salaries: {}, stocks: [],
             showAddModal: false, showStockModal: false, showConsumeModal: false,
-            stockMode: 'EXISTING', // DEFAULT: EXISTENT PENTRU CA ADAOGI MAI DES STOC
+            clientListModal: null, 
+            stockMode: 'EXISTING', 
             loginMode: 'PORTAL', pinBuffer: '', clientPhone: '', hasWelcomed: false, expandedId: null, loginUserSelected: null,
             newOrderMaterials: [] 
         };
@@ -118,12 +119,34 @@
         /* --- STOCK LOGIC --- */
         window.toggleStockModal = (s) => { 
             state.showStockModal = s; 
-            // Daca avem stocuri, intram direct pe existent, altfel pe nou
             state.stockMode = state.stocks.length > 0 ? 'EXISTING' : 'NEW'; 
             render(); 
         };
         window.setStockMode = (mode) => { state.stockMode = mode; render(); };
         window.toggleConsumeModal = (s, stockId) => { state.showConsumeModal = s ? stockId : null; render(); };
+
+        // MODIFICAT: Doar status === 'livrate'
+        window.openClientList = (e, stockId, stockName) => {
+            e.stopPropagation();
+            const list = [];
+            state.items.forEach(i => {
+                if(i.status === 'livrate') { // FIX: DOAR LIVRATE
+                    const m = i.materials.find(mat => mat.stockId === stockId || mat.name === stockName);
+                    if(m) {
+                        list.push({
+                            client: i.text,
+                            phone: i.phone,
+                            date: i.deliveredAt,
+                            qty: (m.loaded > 0 ? m.loaded : m.qty)
+                        });
+                    }
+                }
+            });
+            state.clientListModal = { name: stockName, list: list };
+            render();
+        };
+
+        window.closeClientList = () => { state.clientListModal = null; render(); };
 
         window.handleAddStock = async () => {
             const qty = parseFloat(document.getElementById('st_qty').value) || 0;
@@ -193,6 +216,18 @@
         };
 
         /* --- ORDER & LOGISTICS --- */
+        window.filterStockOptions = (val) => {
+            const options = state.stocks.filter(s => s.name.toLowerCase().includes(val.toLowerCase()));
+            const sel = document.getElementById('new_ord_sel');
+            const isBirou = (state.userName === 'BIROU' || state.userName === 'SEFU');
+            if (options.length > 0) {
+                sel.innerHTML = `<option value="" disabled selected>Alege...</option>` +
+                                options.map(s => `<option value="${s.id}">${s.name} ${isBirou ? `(Stoc: ${s.qty})` : ''}</option>`).join('');
+            } else {
+                sel.innerHTML = `<option value="" disabled selected>Niciun rezultat</option>`;
+            }
+        };
+
         window.addToTempOrder = () => {
             const sel = document.getElementById('new_ord_sel');
             const qty = document.getElementById('new_ord_qty');
@@ -203,9 +238,11 @@
                 stockId: sel.value,
                 qty: parseFloat(qty.value),
                 loaded: 0,
-                calc: {qty:0, days:1, price:0}
+                calc: {qty:0, days:1, price:0} 
             });
             qty.value = '';
+            document.getElementById('search_stock_input').value = ''; 
+            window.filterStockOptions(''); 
             render();
         };
 
@@ -220,7 +257,8 @@
                 text: t, materials: state.newOrderMaterials, phone: p, status: targetStatus, 
                 createdAt: serverTimestamp(), updatedAt: serverTimestamp(), 
                 comments: [], history: [`[${new Date().toLocaleString('ro-RO')}] Creată de ${state.userName}`],
-                createdBy: state.userName
+                createdBy: state.userName,
+                transport: {qty: 1, price: 0} 
             });
             state.showAddModal = false;
         };
@@ -229,7 +267,7 @@
             if(e) e.stopPropagation();
             const inp = document.getElementById(`comment_input_${id}`);
             if(!inp || !inp.value.trim()) return;
-            const txt = `[${new Date().toLocaleTimeString('ro-RO')}] ${state.userName}: ${inp.value.trim()}`;
+            const txt = `[${new Date().toLocaleDateString('ro-RO')} ${new Date().toLocaleTimeString('ro-RO', {hour:'2-digit', minute:'2-digit'})}] ${state.userName}: ${inp.value.trim()}`;
             await updateDoc(doc(db, "flux_logistic_v3", id), { comments: arrayUnion(txt) });
             inp.value = '';
         };
@@ -278,6 +316,36 @@
             if(nextStatus === 'livrate') updateObj.deliveredAt = new Date().toLocaleString('ro-RO');
             if(nextStatus === 'returnate') updateObj.returnedAt = new Date().toLocaleString('ro-RO');
             await updateDoc(doc(db, "flux_logistic_v3", itemId), updateObj);
+        };
+
+        /* --- CALCULATOR LOGIC --- */
+        window.saveCalculation = async (id) => {
+            const item = state.items.find(i => i.id === id);
+            let total = 0;
+            
+            // Update materials calc
+            const newMaterials = item.materials.map((m, idx) => {
+                const days = parseFloat(document.getElementById(`calc_days_${id}_${idx}`).value) || 0;
+                const price = parseFloat(document.getElementById(`calc_price_${id}_${idx}`).value) || 0;
+                // USER SCRIE CANTITATEA MANUAL
+                const userQty = parseFloat(document.getElementById(`calc_qty_${id}_${idx}`).value) || 0;
+                
+                total += (userQty * days * price);
+                return { ...m, calc: { qty: userQty, days, price } };
+            });
+
+            // Update transport
+            const trQty = parseFloat(document.getElementById(`calc_tr_qty_${id}`).value) || 0;
+            const trPrice = parseFloat(document.getElementById(`calc_tr_price_${id}`).value) || 0;
+            total += (trQty * trPrice);
+
+            await updateDoc(doc(db, "flux_logistic_v3", id), {
+                materials: newMaterials,
+                transport: { qty: trQty, price: trPrice },
+                restDePlata: total,
+                history: arrayUnion(`[${new Date().toLocaleString('ro-RO')}] Calcul salvat. Total: ${Math.round(total)} MDL`)
+            });
+            alert("Calcul salvat!");
         };
 
         /* --- SALARIES & CALC --- */
@@ -408,6 +476,7 @@
                 ${state.showAddModal ? renderAddModal() : ''}
                 ${state.showStockModal ? renderStockModal() : ''}
                 ${state.showConsumeModal ? renderConsumeModal() : ''}
+                ${state.clientListModal ? renderClientListModal() : ''}
             `;
         }
 
@@ -416,7 +485,8 @@
             const getActiveAtClients = (stockId, name) => {
                 let total = 0;
                 state.items.forEach(order => {
-                    if (order.status === 'livrate' || order.status === 'datornici') {
+                    // MODIFICARE AICI: Doar daca e 'livrate'
+                    if (order.status === 'livrate') {
                         order.materials.forEach(m => {
                             if (m.stockId === stockId || m.name === name) total += (m.loaded > 0 ? parseFloat(m.loaded) : parseFloat(m.qty));
                         });
@@ -444,8 +514,8 @@
                                     <div class="text-[8px] text-emerald-500 font-bold uppercase">DEPOZIT</div>
                                     <div class="text-lg font-black text-white">${s.qty}</div>
                                 </div>
-                                <div class="bg-blue-900/20 border border-blue-500/20 p-2 rounded-lg flex-1 text-center">
-                                    <div class="text-[8px] text-blue-500 font-bold uppercase">LA CLIENȚI</div>
+                                <div onclick="window.openClientList(event, '${s.id}', '${s.name}')" class="bg-blue-900/20 border border-blue-500/20 p-2 rounded-lg flex-1 text-center cursor-pointer hover:bg-blue-900/40 transition">
+                                    <div class="text-[8px] text-blue-500 font-bold uppercase">LA CLIENȚI ℹ️</div>
                                     <div class="text-lg font-black text-white">${atClient}</div>
                                 </div>
                             </div>
@@ -525,6 +595,36 @@
             </div>`;
         }
 
+        // NEW MODAL FOR CLIENT LIST
+        function renderClientListModal() {
+            if(!state.clientListModal) return '';
+            const { name, list } = state.clientListModal;
+
+            return `<div class="fixed inset-0 bg-black/95 z-[100] p-6 flex items-center justify-center backdrop-blur-xl">
+                <div class="bg-slate-900 w-full max-w-md rounded-[2.5rem] p-8 border border-white/10">
+                    <h2 class="italic-force text-blue-500 mb-1 text-center">LA CLIENȚI</h2>
+                    <p class="text-center text-xs text-slate-400 mb-6 uppercase border-b border-white/10 pb-4">${name}</p>
+                    
+                    <div class="space-y-3 max-h-64 overflow-y-auto mb-6 pr-2">
+                        ${list.length > 0 ? list.map(c => `
+                            <div class="bg-white/5 p-3 rounded-xl border border-white/5">
+                                <div class="flex justify-between items-center mb-1">
+                                    <span class="text-xs font-bold text-white uppercase">${c.client}</span>
+                                    <span class="bg-blue-600 text-white text-[10px] px-2 py-0.5 rounded-full font-black">${c.qty} BUC</span>
+                                </div>
+                                <div class="flex justify-between items-center text-[9px] text-slate-400">
+                                    <a href="tel:${c.phone}" class="underline italic text-blue-400">${c.phone}</a>
+                                    <span>${c.date || 'Fără dată'}</span>
+                                </div>
+                            </div>
+                        `).join('') : `<div class="text-center text-slate-500 text-xs py-4">Nu este la niciun client activ.</div>`}
+                    </div>
+
+                    <button onclick="window.closeClientList()" class="w-full bg-slate-800 text-slate-400 py-4 rounded-2xl text-[10px] font-black uppercase border border-white/5">ÎNCHIDE</button>
+                </div>
+            </div>`;
+        }
+
         function renderPersonalSalaryCard() {
             // Nu aratam pe tabul de salarii mare
             if (state.activeTab === 'salarii') return '';
@@ -562,6 +662,8 @@
 
         function renderOrderCard(item, isBirou) {
             const isExpanded = state.expandedId === item.id;
+            const isCalculatorMode = (item.status === 'istoric' || item.status === 'datornici') && isBirou;
+
             let badgeHtml = '';
             if ((item.status === 'livrate' || item.status === 'datornici') && item.phone) {
                 const sameClientCount = state.items.filter(i => i.phone === item.phone && i.status === item.status).length;
@@ -575,19 +677,67 @@
                             <div class="flex gap-2 items-center"><a href="tel:${item.phone}" onclick="event.stopPropagation()" class="text-blue-400 text-[10px] font-black italic underline">${item.phone || 'N/A'}</a>${item.checkedBy ? `<span class="bg-emerald-500 text-[7px] px-1 rounded text-black font-black">OK</span>` : ''}</div>
                             <div class="text-[8px] font-bold mt-1 text-slate-500">${item.deliveredAt ? `<span class="text-emerald-500 mr-2">LIVRAT: ${item.deliveredAt}</span>` : ''}${item.returnedAt ? `<span class="text-rose-500">RETUR: ${item.returnedAt}</span>` : ''}</div>
                         </div>
-                        <div class="flex items-center gap-2">${isBirou && item.restDePlata > 0 ? `<span class="text-emerald-400 font-black text-[10px]">${Math.round(item.restDePlata)}</span>` : ''}<i data-lucide="${isExpanded ? 'chevron-up' : 'chevron-down'}" size="14" class="text-slate-600"></i></div>
+                        <div class="flex items-center gap-2">${item.restDePlata > 0 ? `<span class="text-emerald-400 font-black text-[10px]">${Math.round(item.restDePlata)} MDL</span>` : ''}<i data-lucide="${isExpanded ? 'chevron-up' : 'chevron-down'}" size="14" class="text-slate-600"></i></div>
                     </div>
                     ${isExpanded ? `
                         <div class="mt-4 pt-4 border-t border-white/5 space-y-4" onclick="event.stopPropagation()">
                             <div class="bg-black/40 rounded-xl p-3 space-y-2">
-                                ${(item.materials || []).map((m, idx) => `
+                                ${!isCalculatorMode ? 
+                                    (item.materials || []).map((m, idx) => `
                                     <div class="flex flex-col gap-2 border-b border-white/5 pb-2">
                                         <div class="flex justify-between text-[10px]">
                                             <span class="text-slate-300">${m.name} (${m.qty})</span>
                                             ${['receptionat', 'returnate', 'primit'].includes(item.status) ? `<input type="number" value="${m.loaded||0}" onchange="updateQty(event, '${item.id}', ${idx}, this.value)" class="w-10 bg-blue-900/30 border border-blue-500 rounded text-center text-blue-400 outline-none">` : `<b class="text-emerald-500">${m.loaded||0}</b>`}
                                         </div>
-                                    </div>`).join('')}
+                                    </div>`).join('') 
+                                : 
+                                    // CALCULATOR MODE UI
+                                    `<div>
+                                        <div class="grid grid-cols-4 gap-2 text-[8px] text-slate-500 mb-2 font-bold text-center">
+                                            <div class="text-left">PRODUS</div>
+                                            <div>CANT</div>
+                                            <div>ZILE</div>
+                                            <div>PREȚ/ZI</div>
+                                        </div>
+                                        ${(item.materials || []).map((m, idx) => {
+                                            const originalQty = m.loaded > 0 ? m.loaded : m.qty;
+                                            const d = m.calc?.days || 0;
+                                            const p = m.calc?.price || 0;
+                                            const userQ = m.calc?.qty !== undefined ? m.calc.qty : originalQty;
+                                            
+                                            return `<div class="grid grid-cols-4 gap-2 items-center mb-2 border-b border-white/5 pb-2">
+                                                <div class="text-[9px] text-white leading-tight">${m.name}<br><span class="text-slate-500 text-[7px]">Stoc: ${originalQty}</span></div>
+                                                <input id="calc_qty_${item.id}_${idx}" type="number" value="${userQ}" class="calc-input bg-slate-800 rounded p-1">
+                                                <input id="calc_days_${item.id}_${idx}" type="number" value="${d}" class="calc-input bg-slate-800 rounded p-1" placeholder="0">
+                                                <input id="calc_price_${item.id}_${idx}" type="number" value="${p}" class="calc-input bg-slate-800 rounded p-1" placeholder="0">
+                                            </div>`;
+                                        }).join('')}
+                                        <div class="grid grid-cols-4 gap-2 items-center mb-2 border-b border-white/5 pb-2 bg-blue-900/10 p-1 rounded">
+                                            <div class="text-[9px] text-blue-300 font-bold">TRANSPORT</div>
+                                            <input id="calc_tr_qty_${item.id}" type="number" value="${item.transport?.qty || 1}" class="calc-input bg-slate-800 rounded p-1" placeholder="Qty">
+                                            <div class="text-center">-</div>
+                                            <input id="calc_tr_price_${item.id}" type="number" value="${item.transport?.price || 0}" class="calc-input bg-slate-800 rounded p-1" placeholder="Preț">
+                                        </div>
+                                        <div class="flex justify-between items-center pt-2">
+                                            <div class="text-[10px] text-slate-400">TOTAL CALCULAT:</div>
+                                            <div class="text-lg font-black text-emerald-400">${Math.round(item.restDePlata || 0)} MDL</div>
+                                        </div>
+                                        <button onclick="window.saveCalculation('${item.id}')" class="w-full bg-emerald-600/20 text-emerald-500 border border-emerald-500/50 py-2 rounded-lg text-[9px] font-bold mt-2 hover:bg-emerald-600 hover:text-white transition">SALVEAZĂ CALCUL</button>
+                                    </div>`
+                                }
                             </div>
+                            
+                            <div class="bg-black/20 p-3 rounded-xl border border-white/5">
+                                <h4 class="text-[8px] font-bold text-slate-500 mb-2 uppercase">DISCUȚII / COMENTARII</h4>
+                                <div class="space-y-1 mb-2 max-h-32 overflow-y-auto">
+                                    ${(item.comments || []).map(c => `<div class="comment-bubble text-[9px] text-blue-200 break-words">${c}</div>`).join('')}
+                                </div>
+                                <div class="flex gap-2">
+                                    <input id="comment_input_${item.id}" class="flex-1 bg-white/5 border border-white/10 rounded-lg px-2 py-1.5 text-[10px] outline-none text-white" placeholder="Adaugă notă...">
+                                    <button onclick="addComment(event, '${item.id}')" class="bg-blue-600 px-3 rounded-lg flex items-center justify-center"><i data-lucide="send" size="10"></i></button>
+                                </div>
+                            </div>
+
                             <div class="pt-2">${renderButtons(item, isBirou)}</div>
                         </div>` : ''}
                 </div>`;
@@ -624,6 +774,11 @@
                     <input id="add_p" class="w-full bg-black p-4 rounded-2xl text-white mb-3 text-sm outline-none" placeholder="TELEFON CLIENT">
                     <div class="bg-white/5 p-4 rounded-2xl mb-4">
                         <h3 class="text-[10px] text-slate-400 mb-2 uppercase font-bold">Adaugă Materiale</h3>
+                        
+                        <div class="mb-2">
+                            <input id="search_stock_input" oninput="window.filterStockOptions(this.value)" class="w-full bg-slate-800 p-2 rounded-lg text-xs outline-none text-white border border-white/10" placeholder="🔍 Caută în listă...">
+                        </div>
+
                         <div class="flex gap-2 mb-2">
                             <select id="new_ord_sel" class="bg-black flex-1 p-2 rounded-lg text-xs outline-none uppercase text-white">
                                 <option value="" disabled selected>Alege...</option>
