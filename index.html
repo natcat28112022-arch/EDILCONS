@@ -21,6 +21,7 @@
         .debt-circle { width: 35px; height: 35px; border-radius: 50%; background: #ef4444; border: 2px solid #f87171; display: flex; align-items: center; justify-content: center; font-size: 8px; font-weight: 900; color: white; box-shadow: 0 0 10px rgba(239, 68, 68, 0.5); }
         .count-badge-client { width: 20px; height: 20px; background: #3b82f6; color: white; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 900; margin-left: 6px; }
         .activity-badge { background: #10b981; color: white; padding: 2px 6px; border-radius: 6px; font-size: 10px; font-weight: 900; }
+        .finance-widget { background: linear-gradient(90deg, rgba(16, 185, 129, 0.1) 0%, rgba(37, 99, 235, 0.1) 100%); border: 1px solid rgba(255,255,255,0.1); }
         .pin-dot { transition: all 0.2s; }
     </style>
 </head>
@@ -29,7 +30,7 @@
 
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-        import { getFirestore, collection, addDoc, updateDoc, doc, onSnapshot, serverTimestamp, deleteDoc, arrayUnion, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+        import { getFirestore, collection, addDoc, updateDoc, doc, onSnapshot, serverTimestamp, deleteDoc, arrayUnion, setDoc, getDoc, query, orderBy } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
         import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
 
         const firebaseConfig = {
@@ -67,9 +68,10 @@
         let state = { 
             userName: localStorage.getItem('flux_username') || '', 
             isClient: localStorage.getItem('is_client') === 'true',
-            activeTab: 'actuale', items: [], salaries: {}, stocks: [],
+            activeTab: 'actuale', items: [], salaries: {}, stocks: [], financials: [],
             showAddModal: false, showStockModal: false, showConsumeModal: false,
-            clientListModal: null, 
+            clientListModal: null, showFinanceModal: false, showExpenseModal: false,
+            financeFilter: 'AZI', // AZI, LUNA, TOT
             stockMode: 'EXISTING', 
             loginMode: 'PORTAL', pinBuffer: '', clientPhone: '', hasWelcomed: false, expandedId: null, loginUserSelected: null,
             newOrderMaterials: [] 
@@ -116,6 +118,77 @@
         window.toggleExpand = (id) => { state.expandedId = (state.expandedId === id) ? null : id; render(); };
         window.toggleAdd = (s) => { state.showAddModal = s; state.newOrderMaterials = []; render(); };
 
+        /* --- FINANCE LOGIC --- */
+        window.toggleFinanceModal = (s) => { state.showFinanceModal = s; render(); };
+        window.setFinanceFilter = (f) => { state.financeFilter = f; render(); };
+        window.toggleExpenseModal = (s) => { state.showExpenseModal = s; render(); };
+
+        // NEW: JUMP TO ORDER
+        window.jumpToOrder = (orderId) => {
+            const item = state.items.find(i => i.id === orderId);
+            if(item) {
+                state.activeTab = item.status; // Schimba tabul
+                state.expandedId = orderId; // Deschide cardul
+                state.showFinanceModal = false; // Inchide modalul
+                render();
+            } else {
+                alert("Comanda nu mai există sau a fost ștearsă.");
+            }
+        };
+
+        window.handleAddExpense = async () => {
+            const desc = document.getElementById('exp_desc').value.trim();
+            const amount = parseFloat(document.getElementById('exp_amount').value) || 0;
+            const currency = document.getElementById('exp_curr').value;
+
+            if(!desc || amount <= 0) return alert("Completează datele!");
+
+            await addDoc(collection(db, "registru_casa"), {
+                type: 'cheltuiala',
+                details: desc,
+                amount: amount,
+                currency: currency,
+                date: serverTimestamp(),
+                addedBy: state.userName
+            });
+            state.showExpenseModal = false;
+            state.showFinanceModal = true;
+        };
+
+        window.handlePayment = async (orderId) => {
+            const payMDL = parseFloat(document.getElementById(`pay_mdl_${orderId}`).value) || 0;
+            const payEUR = parseFloat(document.getElementById(`pay_eur_${orderId}`).value) || 0;
+
+            if(payMDL === 0 && payEUR === 0) return alert("Introdu o sumă!");
+
+            const item = state.items.find(i => i.id === orderId);
+            let newRest = (item.restDePlata || 0) - payMDL; 
+
+            const logEntry = `[${new Date().toLocaleString('ro-RO')}] Achitat: ${payMDL > 0 ? payMDL + ' MDL ' : ''}${payEUR > 0 ? payEUR + ' EUR' : ''}`;
+
+            if(payMDL > 0) {
+                await addDoc(collection(db, "registru_casa"), {
+                    type: 'incasare', details: `Client: ${item.text}`, orderId: item.id,
+                    amount: payMDL, currency: 'MDL', date: serverTimestamp(), addedBy: state.userName
+                });
+            }
+            if(payEUR > 0) {
+                await addDoc(collection(db, "registru_casa"), {
+                    type: 'incasare', details: `Client: ${item.text}`, orderId: item.id,
+                    amount: payEUR, currency: 'EUR', date: serverTimestamp(), addedBy: state.userName
+                });
+            }
+
+            await updateDoc(doc(db, "flux_logistic_v3", orderId), {
+                restDePlata: newRest,
+                history: arrayUnion(logEntry)
+            });
+            
+            document.getElementById(`pay_mdl_${orderId}`).value = '';
+            document.getElementById(`pay_eur_${orderId}`).value = '';
+            alert("Încasare înregistrată!");
+        };
+
         /* --- STOCK LOGIC --- */
         window.toggleStockModal = (s) => { 
             state.showStockModal = s; 
@@ -125,12 +198,11 @@
         window.setStockMode = (mode) => { state.stockMode = mode; render(); };
         window.toggleConsumeModal = (s, stockId) => { state.showConsumeModal = s ? stockId : null; render(); };
 
-        // MODIFICAT: Doar status === 'livrate'
         window.openClientList = (e, stockId, stockName) => {
             e.stopPropagation();
             const list = [];
             state.items.forEach(i => {
-                if(i.status === 'livrate') { // FIX: DOAR LIVRATE
+                if(i.status === 'livrate') { 
                     const m = i.materials.find(mat => mat.stockId === stockId || mat.name === stockName);
                     if(m) {
                         list.push({
@@ -249,17 +321,36 @@
         window.handleAddItem = async () => {
             const t = document.getElementById('add_t').value;
             const p = document.getElementById('add_p').value;
+            
+            const advMDL = parseFloat(document.getElementById('add_avans_mdl')?.value) || 0;
+            const advEUR = parseFloat(document.getElementById('add_avans_eur')?.value) || 0;
+
             if(!t || state.newOrderMaterials.length === 0) return alert("Completează numele și adaugă marfă!");
             const isBirou = (state.userName === 'BIROU' || state.userName === 'SEFU');
             const targetStatus = isBirou ? 'actuale' : 'cereri';
             
-            await addDoc(collection(db, "flux_logistic_v3"), { 
+            const docRef = await addDoc(collection(db, "flux_logistic_v3"), { 
                 text: t, materials: state.newOrderMaterials, phone: p, status: targetStatus, 
                 createdAt: serverTimestamp(), updatedAt: serverTimestamp(), 
                 comments: [], history: [`[${new Date().toLocaleString('ro-RO')}] Creată de ${state.userName}`],
                 createdBy: state.userName,
-                transport: {qty: 1, price: 0} 
+                transport: {qty: 1, price: 0},
+                advance: { mdl: advMDL, eur: advEUR }
             });
+
+            if (advMDL > 0) {
+                await addDoc(collection(db, "registru_casa"), {
+                    type: 'incasare', details: `Avans Comandă Nouă: ${t}`, orderId: docRef.id,
+                    amount: advMDL, currency: 'MDL', date: serverTimestamp(), addedBy: state.userName
+                });
+            }
+            if (advEUR > 0) {
+                await addDoc(collection(db, "registru_casa"), {
+                    type: 'incasare', details: `Avans Comandă Nouă: ${t}`, orderId: docRef.id,
+                    amount: advEUR, currency: 'EUR', date: serverTimestamp(), addedBy: state.userName
+                });
+            }
+
             state.showAddModal = false;
         };
 
@@ -323,27 +414,27 @@
             const item = state.items.find(i => i.id === id);
             let total = 0;
             
-            // Update materials calc
             const newMaterials = item.materials.map((m, idx) => {
                 const days = parseFloat(document.getElementById(`calc_days_${id}_${idx}`).value) || 0;
                 const price = parseFloat(document.getElementById(`calc_price_${id}_${idx}`).value) || 0;
-                // USER SCRIE CANTITATEA MANUAL
                 const userQty = parseFloat(document.getElementById(`calc_qty_${id}_${idx}`).value) || 0;
                 
                 total += (userQty * days * price);
                 return { ...m, calc: { qty: userQty, days, price } };
             });
 
-            // Update transport
             const trQty = parseFloat(document.getElementById(`calc_tr_qty_${id}`).value) || 0;
             const trPrice = parseFloat(document.getElementById(`calc_tr_price_${id}`).value) || 0;
             total += (trQty * trPrice);
 
+            const advMDL = item.advance?.mdl || 0;
+            const finalDebt = total - advMDL; 
+
             await updateDoc(doc(db, "flux_logistic_v3", id), {
                 materials: newMaterials,
                 transport: { qty: trQty, price: trPrice },
-                restDePlata: total,
-                history: arrayUnion(`[${new Date().toLocaleString('ro-RO')}] Calcul salvat. Total: ${Math.round(total)} MDL`)
+                restDePlata: finalDebt,
+                history: arrayUnion(`[${new Date().toLocaleString('ro-RO')}] Calcul salvat. Total: ${Math.round(total)} - Avans ${advMDL} = ${Math.round(finalDebt)} MDL`)
             });
             alert("Calcul salvat!");
         };
@@ -439,6 +530,123 @@
                 </div>`;
         }
 
+        function renderFinanceWidget() {
+            const today = new Date().toLocaleDateString('ro-RO');
+            const todaysRecords = state.financials.filter(f => f.date && f.date.toDate().toLocaleDateString('ro-RO') === today);
+
+            let inMDL = 0, inEUR = 0, outMDL = 0, outEUR = 0;
+            todaysRecords.forEach(r => {
+                if(r.type === 'incasare') {
+                    if(r.currency === 'MDL') inMDL += r.amount;
+                    if(r.currency === 'EUR') inEUR += r.amount;
+                } else {
+                    if(r.currency === 'MDL') outMDL += r.amount;
+                    if(r.currency === 'EUR') outEUR += r.amount;
+                }
+            });
+
+            // COMPACT WIDGET
+            return `<div onclick="window.toggleFinanceModal(true)" class="mx-4 mt-2 mb-4 p-3 finance-widget rounded-xl cursor-pointer hover:bg-white/5 transition flex justify-between items-center text-xs">
+                <div class="flex items-center gap-2">
+                    <span class="text-[9px] text-slate-400 font-bold uppercase tracking-widest">Financiar Azi:</span>
+                </div>
+                <div class="flex gap-3 font-bold text-white text-[10px]">
+                    <div><span class="text-emerald-400">+${inMDL}</span> / <span class="text-rose-400">-${outMDL}</span> <span class="text-slate-500">=</span> ${inMDL - outMDL} L</div>
+                    <div class="border-l border-white/10 pl-3"><span class="text-emerald-400">+${inEUR}</span> / <span class="text-rose-400">-${outEUR}</span> <span class="text-slate-500">=</span> ${inEUR - outEUR} €</div>
+                </div>
+            </div>`;
+        }
+
+        function renderFinanceModal() {
+            if(!state.showFinanceModal) return '';
+
+            const today = new Date();
+            const filtered = state.financials.filter(f => {
+                if(!f.date) return false;
+                const d = f.date.toDate();
+                if(state.financeFilter === 'AZI') return d.toLocaleDateString('ro-RO') === today.toLocaleDateString('ro-RO');
+                if(state.financeFilter === 'LUNA') return d.getMonth() === today.getMonth() && d.getFullYear() === today.getFullYear();
+                return true;
+            }).sort((a,b) => b.date - a.date);
+
+            // Calculate totals based on FILTER
+            let tInMDL = 0, tInEUR = 0, tOutMDL = 0, tOutEUR = 0;
+            filtered.forEach(r => {
+                if(r.type === 'incasare') {
+                    if(r.currency === 'MDL') tInMDL += r.amount;
+                    if(r.currency === 'EUR') tInEUR += r.amount;
+                } else {
+                    if(r.currency === 'MDL') tOutMDL += r.amount;
+                    if(r.currency === 'EUR') tOutEUR += r.amount;
+                }
+            });
+
+            return `<div class="fixed inset-0 bg-black/95 z-[100] p-4 flex flex-col items-center justify-start pt-10 backdrop-blur-xl">
+                <div class="w-full max-w-lg bg-slate-900 rounded-[2rem] p-6 border border-white/10 flex-1 flex flex-col max-h-[90vh]">
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 class="italic-force text-emerald-500">REGISTRU CASĂ</h2>
+                        <button onclick="window.toggleFinanceModal(false)" class="text-xs text-slate-400">ÎNCHIDE</button>
+                    </div>
+
+                    <div class="flex gap-2 mb-4 bg-black/40 p-1 rounded-xl">
+                        ${['AZI', 'LUNA', 'TOT'].map(f => `<button onclick="window.setFinanceFilter('${f}')" class="flex-1 py-2 rounded-lg text-[10px] font-bold ${state.financeFilter === f ? 'bg-emerald-600 text-white' : 'text-slate-500'}">${f}</button>`).join('')}
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-3 mb-6 bg-white/5 p-4 rounded-xl border border-white/5">
+                        <div class="text-center border-r border-white/10">
+                            <div class="text-[8px] text-slate-400 uppercase mb-1">RULAJ (MDL)</div>
+                            <div class="text-xs font-black text-white"><span class="text-emerald-400">+${tInMDL}</span> / <span class="text-rose-400">-${tOutMDL}</span></div>
+                            <div class="text-sm font-black text-blue-400 mt-1">= ${tInMDL - tOutMDL} MDL</div>
+                        </div>
+                        <div class="text-center">
+                            <div class="text-[8px] text-slate-400 uppercase mb-1">RULAJ (EUR)</div>
+                            <div class="text-xs font-black text-white"><span class="text-emerald-400">+${tInEUR}</span> / <span class="text-rose-400">-${tOutEUR}</span></div>
+                            <div class="text-sm font-black text-blue-400 mt-1">= ${tInEUR - tOutEUR} EUR</div>
+                        </div>
+                    </div>
+
+                    <div class="overflow-y-auto flex-1 space-y-2 pr-2">
+                        ${filtered.length > 0 ? filtered.map(f => `
+                            <div onclick="${f.orderId ? `window.jumpToOrder('${f.orderId}')` : ''}" class="p-3 rounded-xl border ${f.type === 'incasare' ? 'border-emerald-500/20 bg-emerald-900/10' : 'border-rose-500/20 bg-rose-900/10'} cursor-pointer hover:opacity-80 transition">
+                                <div class="flex justify-between items-center mb-1">
+                                    <span class="text-[10px] font-bold text-white uppercase flex items-center gap-1">
+                                        ${f.details} 
+                                        ${f.orderId ? '<i data-lucide="external-link" size="10" class="text-blue-400"></i>' : ''}
+                                    </span>
+                                    <span class="font-black text-xs ${f.type === 'incasare' ? 'text-emerald-400' : 'text-rose-400'}">${f.type === 'incasare' ? '+' : '-'}${f.amount} ${f.currency}</span>
+                                </div>
+                                <div class="flex justify-between text-[8px] text-slate-500">
+                                    <span>${f.date.toDate().toLocaleString('ro-RO')}</span>
+                                    <span>${f.addedBy}</span>
+                                </div>
+                            </div>
+                        `).join('') : `<div class="text-center text-slate-600 text-xs py-10">Nicio înregistrare.</div>`}
+                    </div>
+
+                    <button onclick="window.toggleExpenseModal(true)" class="mt-4 w-full bg-rose-600 py-4 rounded-xl font-bold text-xs uppercase shadow-lg shadow-rose-900/20">ADAUGĂ CHELTUIALĂ</button>
+                </div>
+            </div>`;
+        }
+
+        function renderExpenseModal() {
+            if(!state.showExpenseModal) return '';
+            return `<div class="fixed inset-0 bg-black/95 z-[110] p-6 flex items-center justify-center backdrop-blur-xl">
+                <div class="bg-slate-900 w-full max-w-md rounded-[2.5rem] p-8 border border-rose-500/30">
+                    <h2 class="italic-force text-rose-500 mb-6 text-center">CHELTUIALĂ NOUĂ</h2>
+                    <input id="exp_desc" class="w-full bg-black p-4 rounded-2xl text-white mb-3 text-sm outline-none" placeholder="DESCRIERE (Ex: Motorină, Prânz)">
+                    <div class="flex gap-2 mb-6">
+                        <input id="exp_amount" type="number" class="flex-1 bg-black p-4 rounded-2xl text-white text-sm outline-none" placeholder="SUMA">
+                        <select id="exp_curr" class="w-24 bg-black p-4 rounded-2xl text-white text-sm outline-none font-bold">
+                            <option value="MDL">MDL</option>
+                            <option value="EUR">EUR</option>
+                        </select>
+                    </div>
+                    <button onclick="window.handleAddExpense()" class="w-full bg-rose-600 py-5 rounded-2xl italic-force text-xs mb-4">SALVEAZĂ</button>
+                    <button onclick="window.toggleExpenseModal(false)" class="w-full text-slate-500 text-[10px] font-black uppercase">ANULARE</button>
+                </div>
+            </div>`;
+        }
+
         function renderStaffDashboard(root) {
             const isBirou = (state.userName === 'BIROU' || state.userName === 'SEFU');
             const todayStr = new Date().toLocaleDateString('ro-RO');
@@ -450,6 +658,9 @@
                     <div class="flex items-center gap-3">${isBirou ? `<div class="debt-circle">${Math.round(totalDebt)}</div>` : ''}<span class="italic-force text-blue-500 text-xs">EDIL STAFF</span></div>
                     <div class="flex items-center gap-2"><div class="activity-badge">${todayActions}</div><button onclick="window.logout()" class="text-[9px] font-bold bg-white/5 px-3 py-1.5 rounded-full uppercase">${state.userName}</button></div>
                 </header>
+                
+                ${isBirou ? renderFinanceWidget() : ''}
+
                 <nav class="flex gap-2 overflow-x-auto px-4 py-2 sticky top-[53px] glass z-40 no-scrollbar">
                     ${Object.keys(STATUS_CONFIG).map(k => {
                         if ((k === 'datornici' || k === 'achitate' || k === 'salarii' || k === 'cereri' || k === 'stocuri') && !isBirou) return '';
@@ -477,6 +688,8 @@
                 ${state.showStockModal ? renderStockModal() : ''}
                 ${state.showConsumeModal ? renderConsumeModal() : ''}
                 ${state.clientListModal ? renderClientListModal() : ''}
+                ${renderFinanceModal()}
+                ${renderExpenseModal()}
             `;
         }
 
@@ -485,7 +698,6 @@
             const getActiveAtClients = (stockId, name) => {
                 let total = 0;
                 state.items.forEach(order => {
-                    // MODIFICARE AICI: Doar daca e 'livrate'
                     if (order.status === 'livrate') {
                         order.materials.forEach(m => {
                             if (m.stockId === stockId || m.name === name) total += (m.loaded > 0 ? parseFloat(m.loaded) : parseFloat(m.qty));
@@ -669,11 +881,19 @@
                 const sameClientCount = state.items.filter(i => i.phone === item.phone && i.status === item.status).length;
                 if (sameClientCount > 1) badgeHtml = `<div class="count-badge-client">${sameClientCount}</div>`;
             }
+
+            // SHOW ADVANCE IF EXISTS
+            let advanceHtml = '';
+            if(item.advance && (item.advance.mdl > 0 || item.advance.eur > 0)) {
+                advanceHtml = `<div class="text-[9px] text-emerald-400 font-bold mt-1">AVANS: ${item.advance.mdl > 0 ? item.advance.mdl + ' MDL ' : ''} ${item.advance.eur > 0 ? item.advance.eur + ' EUR' : ''}</div>`;
+            }
+
             return `
                 <div onclick="toggleExpand('${item.id}')" class="order-card p-4 mb-3 rounded-2xl border-l-4 ${STATUS_CONFIG[item.status].color} ${isExpanded ? 'ring-2 ring-blue-500/20' : ''}">
                     <div class="flex justify-between items-center">
                         <div>
                             <div class="flex items-center"><h3 class="italic-force text-white text-[11px]">${item.text}</h3>${badgeHtml}</div>
+                            ${advanceHtml}
                             <div class="flex gap-2 items-center"><a href="tel:${item.phone}" onclick="event.stopPropagation()" class="text-blue-400 text-[10px] font-black italic underline">${item.phone || 'N/A'}</a>${item.checkedBy ? `<span class="bg-emerald-500 text-[7px] px-1 rounded text-black font-black">OK</span>` : ''}</div>
                             <div class="text-[8px] font-bold mt-1 text-slate-500">${item.deliveredAt ? `<span class="text-emerald-500 mr-2">LIVRAT: ${item.deliveredAt}</span>` : ''}${item.returnedAt ? `<span class="text-rose-500">RETUR: ${item.returnedAt}</span>` : ''}</div>
                         </div>
@@ -720,9 +940,20 @@
                                         </div>
                                         <div class="flex justify-between items-center pt-2">
                                             <div class="text-[10px] text-slate-400">TOTAL CALCULAT:</div>
-                                            <div class="text-lg font-black text-emerald-400">${Math.round(item.restDePlata || 0)} MDL</div>
+                                            <div class="text-lg font-black text-emerald-400">
+                                                ${item.restDePlata > 0 ? Math.round(item.restDePlata) : 0} MDL
+                                            </div>
                                         </div>
-                                        <button onclick="window.saveCalculation('${item.id}')" class="w-full bg-emerald-600/20 text-emerald-500 border border-emerald-500/50 py-2 rounded-lg text-[9px] font-bold mt-2 hover:bg-emerald-600 hover:text-white transition">SALVEAZĂ CALCUL</button>
+                                        <button onclick="window.saveCalculation('${item.id}')" class="w-full bg-slate-800 text-slate-300 border border-white/10 py-2 rounded-lg text-[9px] font-bold mt-2 hover:bg-slate-700 transition">ACTUALIZEAZĂ CALCULUL</button>
+
+                                        <div class="mt-4 bg-emerald-900/10 border border-emerald-500/20 p-2 rounded-xl">
+                                            <div class="text-[9px] text-emerald-500 font-bold mb-2 uppercase">ACHITARE RAPIDĂ</div>
+                                            <div class="flex gap-2">
+                                                <input id="pay_mdl_${item.id}" type="number" class="flex-1 bg-black p-2 rounded-lg text-xs text-white outline-none border border-emerald-500/30" placeholder="SUMA MDL">
+                                                <input id="pay_eur_${item.id}" type="number" class="flex-1 bg-black p-2 rounded-lg text-xs text-white outline-none border border-emerald-500/30" placeholder="SUMA EUR">
+                                            </div>
+                                            <button onclick="window.handlePayment('${item.id}')" class="w-full bg-emerald-600 text-white py-2 rounded-lg text-[9px] font-black mt-2 uppercase shadow-lg shadow-emerald-900/20">ÎNCASEAZĂ</button>
+                                        </div>
                                     </div>`
                                 }
                             </div>
@@ -772,6 +1003,13 @@
                     <h2 class="italic-force text-blue-500 mb-6 text-center">COMANDĂ NOUĂ</h2>
                     <input id="add_t" class="w-full bg-black p-4 rounded-2xl text-white mb-3 text-sm outline-none" placeholder="NUME CLIENT">
                     <input id="add_p" class="w-full bg-black p-4 rounded-2xl text-white mb-3 text-sm outline-none" placeholder="TELEFON CLIENT">
+                    
+                    ${isBirou ? `
+                    <div class="grid grid-cols-2 gap-3 mb-4">
+                        <input id="add_avans_mdl" type="number" class="bg-black p-3 rounded-xl text-white text-xs outline-none border border-emerald-500/30" placeholder="AVANS MDL">
+                        <input id="add_avans_eur" type="number" class="bg-black p-3 rounded-xl text-white text-xs outline-none border border-emerald-500/30" placeholder="AVANS EUR">
+                    </div>` : ''}
+
                     <div class="bg-white/5 p-4 rounded-2xl mb-4">
                         <h3 class="text-[10px] text-slate-400 mb-2 uppercase font-bold">Adaugă Materiale</h3>
                         
@@ -801,6 +1039,7 @@
             onSnapshot(collection(db, "flux_logistic_v3"), s => { state.items = s.docs.map(d => ({id:d.id, ...d.data()})); render(); });
             onSnapshot(collection(db, "salarii"), s => { s.docs.forEach(d => { state.salaries[d.id] = d.data(); }); render(); });
             onSnapshot(collection(db, "stocuri"), s => { state.stocks = s.docs.map(d => ({id:d.id, ...d.data()})); render(); });
+            onSnapshot(query(collection(db, "registru_casa"), orderBy("date", "desc")), s => { state.financials = s.docs.map(d => ({id:d.id, ...d.data()})); render(); });
         });
     </script>
 </body>
